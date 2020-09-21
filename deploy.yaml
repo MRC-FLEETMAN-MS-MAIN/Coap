@@ -1,0 +1,165 @@
+# Provision of EC2 Instance
+
+- hosts: localhost
+
+  vars:
+     region: us-east-1
+     instance_type: t2.nano
+     base_image: ami-0c94855ba95c71c99
+     count_instances: 1
+     elastic_ip: 3.233.132.93
+
+  tasks:
+
+
+    - name: Create a suitable Firewall
+      ec2_group:
+         name: coap_security_groups
+         description: Specific rules for a Jenkins Instance
+         region: us-east-1
+         rules_egress:
+            - proto: tcp
+              from_port: 0
+              to_port: 65535
+              cidr_ip: 0.0.0.0/0
+         rules:
+            - proto: tcp
+              from_port: 22
+              to_port: 22
+              cidr_ip: 0.0.0.0/0
+
+            - proto: tcp
+              from_port: 3002
+              to_port: 3002
+              cidr_ip: 0.0.0.0/0
+
+            - proto: udp
+              from_port: 5683
+              to_port: 5683
+              cidr_ip: 0.0.0.0/0
+
+            
+
+
+    - name: Create an EC2 machine
+      ec2:
+         key_name: microservice
+         group:  coap_security_groups
+         instance_type: t2.nano
+         region: us-east-1
+         image:  "{{ base_image }}"
+         wait: yes
+         exact_count: "{{ count_instances }}"
+         instance_tags:
+                 Name: Coap_Server
+         count_tag:
+             Name: Coap_Server
+
+      register: newinstance
+
+    - name: Allocating elastic IP to instance
+      ec2_eip:
+         aws_access_key: AKIASZM335QBSRJFVV6N
+         aws_secret_key: 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
+         in_vpc: yes
+         ip: "{{ elastic_ip }}"
+         state: present
+         region: us-east-1
+         instance_id: "{{ newinstance.instance_ids[0] }}"
+      register: instance_eip
+
+
+    - name: Gather the new ip addresses
+      add_host: groups=new_ec2_instances hostname="{{ item.private_ip }}"
+      with_items: "{{ newinstance.instances }}"
+
+
+    - name: Wait for SSH Server to start responding
+      wait_for:
+               port: 22
+               host: "{{ item.private_ip }}"
+               state: started
+      with_items: "{{ newinstance.instances }}"
+
+
+- hosts: new_ec2_instances, tag_Name_Coap_Server
+  tasks:
+
+    - name: Install Apache latest version
+      yum: name=httpd state=absent
+      become: yes
+
+
+
+    - name: Patch up the server
+      yum: name=* state=latest
+      become: yes
+
+
+    - name: Install Git
+      yum:
+         name: git
+         state: latest
+      become: yes
+
+    - name: Checkout Project
+      git:
+        repo:  https://github.com/MRC-FLEETMAN-MS-MAIN/Coap
+        dest: /home/ec2-user/coap
+        version: master
+
+
+
+
+    - name: Remove exisiting docker files
+      yum:
+        name:
+          - docker
+          - docker-client
+          - docker-client-latest
+          - docker-common
+          - docker-latest
+          - docker-latest-logrotate
+          - docker-logrotate
+          - docker-engine
+        state: removed
+      become: yes
+
+    - name: Install Docker
+      yum:
+        name:
+          - docker
+      become: yes
+
+    - name: "Starting and Enabling Docker service"
+      service:
+        name: docker
+        state: started
+        enabled: yes
+      become: yes
+
+
+    - name: Add user ec2-user to docker group
+      user:
+         name: ec2-user
+         groups: docker
+         append: yes
+      become: yes
+
+
+    - name: Building Docker image
+      command: docker build --tag coap:1.0 .
+      args: 
+             chdir: coap/
+      become: yes
+
+    - name: Run the Docker container
+      command: docker run --restart always -p 5683:5683/udp -p 3002:3002  --detach --name coapcontainer coap:1.0
+      become: yes
+
+  
+
+
+
+
+
