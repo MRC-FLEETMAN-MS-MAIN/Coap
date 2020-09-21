@@ -1,116 +1,95 @@
 # Provision of EC2 Instance
-
 - hosts: localhost
-
-  vars:
+  gather_facts: yes
+  vars: 
      region: us-east-1
+     keypair_name: microservice
      instance_type: t2.nano
-     base_image: ami-0c94855ba95c71c99
-     count_instances: 1
-     elastic_ip: 3.233.132.93
-
+     image_name: ami-0c94855ba95c71c99
+     live_ip_address: 3.233.132.93
+  
   tasks:
 
+    - name: Set up variables for third play ( as a part of Blue/Green deployment) 
+      set_fact:
+          region: "{{ region }}"
+          live_ip_address: "{{ live_ip_address }}"
 
-    - name: Create a suitable Firewall
+    
+    - name: Setup security group
       ec2_group:
-         name: coap_security_groups
-         description: Specific rules for a Jenkins Instance
-         region: us-east-1
-         rules_egress:
-            - proto: tcp
-              from_port: 0
-              to_port: 65535
-              cidr_ip: 0.0.0.0/0
-         rules:
-            - proto: tcp
-              from_port: 22
-              to_port: 22
-              cidr_ip: 0.0.0.0/0
+        name: coap-security
+        description: Security rules for Coap Server and WebSocket client
+        region: "{{ region }}"
+        rules_egress:
+           - proto: tcp
+             from_port: 0
+             to_port: 65535
+             cidr_ip: 0.0.0.0/0
+        rules:
+           - proto: tcp
+             from_port: 3002
+             to_port: 3002
+             cidr_ip: 0.0.0.0/0
+           
+           - proto: tcp
+             from_port: 22
+             to_port: 22
+             cidr_ip: 0.0.0.0/0
 
-            - proto: tcp
-              from_port: 3002
-              to_port: 3002
-              cidr_ip: 0.0.0.0/0
+           - proto: udp
+             from_port: 5683
+             to_port: 5683
+             cidr_ip: 0.0.0.0/0
 
-            - proto: udp
-              from_port: 5683
-              to_port: 5683
-              cidr_ip: 0.0.0.0/0
-
-            
-
-
-    - name: Create an EC2 machine
+    - name: Provision an instance
       ec2:
-         key_name: microservice
-         group:  coap_security_groups
-         instance_type: t2.nano
-         region: us-east-1
-         image:  "{{ base_image }}"
-         wait: yes
-         exact_count: "{{ count_instances }}"
-         instance_tags:
-                 Name: Coap_Server
-         count_tag:
-             Name: Coap_Server
+        key_name: "{{ keypair_name }}"
+        group: coap-security
+        instance_type: "{{ instance_type }}"
+        image: "{{ image_name }}"
+        wait: true
+        region: "{{region}}"
+        exact_count: 1 
+        count_tag:
+          Name: Coap_Server
+          Deploy: New
+        instance_tags:
+          Name: Coap_Server
+          Deploy: Blue
+      register: ec2
 
-      register: newinstance
-
-    - name: Allocating elastic IP to instance
-      ec2_eip:
-         in_vpc: yes
-         ip: "{{ elastic_ip }}"
-         state: present
-         region: us-east-1
-         instance_id: "{{ newinstance.instance_ids[0] }}"
-      register: instance_eip
-
-
-    - name: Gather the new ip addresses
-      add_host: groups=new_ec2_instances hostname="{{ item.private_ip }}"
-      with_items: "{{ newinstance.instances }}"
-
+    - name: Add all instance public IPs to host group
+      add_host: hostname={{ item.public_ip }} groups=ec2hosts
+      with_items: "{{ec2.instances}}"
 
     - name: Wait for SSH Server to start responding
       wait_for:
-               port: 22
-               host: "{{ item.private_ip }}"
-               state: started
-      with_items: "{{ newinstance.instances }}"
+              port: 22
+              host: "{{item.public_ip}}"
+              state: started
+      with_items: "{{ec2.instances}}"
 
-
-- hosts: new_ec2_instances, tag_Name_Coap_Server
+- hosts:  tag_Deploy_Blue ec2hosts
   tasks:
+  - name: upgrade all packages
+    yum: name=* state=latest
+    become: true
+  
+  - name: Install Git
+    yum:
+       name: git
+       state: latest
+    become: yes
 
-    - name: Install Apache latest version
-      yum: name=httpd state=absent
-      become: yes
+  - name: Checkout Project
+    git:
+      repo:  https://github.com/MRC-FLEETMAN-MS-MAIN/Coap
+      dest: /home/ec2-user/coap
+      version: master
 
-
-
-    - name: Patch up the server
-      yum: name=* state=latest
-      become: yes
-
-
-    - name: Install Git
-      yum:
-         name: git
-         state: latest
-      become: yes
-
-    - name: Checkout Project
-      git:
-        repo:  https://github.com/MRC-FLEETMAN-MS-MAIN/Coap
-        dest: /home/ec2-user/coap
-        version: master
-
-
-
-
-    - name: Remove exisiting docker files
-      yum:
+  - name: Remove exisiting docker files
+    yum:
         name:
           - docker
           - docker-client
@@ -121,43 +100,106 @@
           - docker-logrotate
           - docker-engine
         state: removed
-      become: yes
+    become: yes
 
-    - name: Install Docker
-      yum:
+  - name: Install Docker
+    yum:
         name:
           - docker
-      become: yes
+    become: yes
 
-    - name: "Starting and Enabling Docker service"
-      service:
+  - name: "Starting and Enabling Docker service"
+    service:
         name: docker
         state: started
         enabled: yes
-      become: yes
+    become: yes
 
 
-    - name: Add user ec2-user to docker group
-      user:
+  - name: Add user ec2-user to docker group
+    user:
          name: ec2-user
          groups: docker
          append: yes
-      become: yes
-
-
-    - name: Building Docker image
-      command: docker build --tag coap:1.0 .
-      args: 
-             chdir: coap/
-      become: yes
-
-    - name: Run the Docker container
-      command: docker run --restart always -p 5683:5683/udp -p 3002:3002  --detach --name coapcontainer coap:1.0
-      become: yes
-
-  
+    become: yes
 
 
 
 
+  - name: Build the Docker image
+    command: docker build --tag coap:1.0 .
+    args:
+            chdir: coap/
 
+    become: yes
+
+
+  - name: Run the Docker container
+    command: docker run --restart always -p 5683:5683/udp -p 3002:3002  --detach --name coapcontainer coap:1.0
+    become: yes
+
+
+
+# Series of steps to implement a Green -> Blue switchover
+
+- hosts: localhost
+  tasks:
+  - name: Gather facts about the new blue server
+    ec2_instance_info:
+       filters:
+          "tag:Deploy": Blue
+          "tag:Name": Coap_Server
+          instance-state-name: running
+       region: "{{ region }}"
+    register: new_server
+    
+   
+  -  debug: msg="{{ new_server.instances[0].instance_id}}"
+
+  - name: Get the id of the old, soon to be dead, green server
+    ec2_instance_info:
+       filters:
+          "tag:Deploy": Green
+          "tag:Name": Coap_Server
+          instance-state-name: running
+       region: "{{ region }}"
+    register: old_green
+
+  - name: Deallocate the EIP
+    ec2_eip:
+       instance_id: "{{ old_green.instances[0].instance_id }}"
+       ip: "{{ live_ip_address }}"
+       state: absent
+       region: "{{ region }}"
+    when: old_green.instances[0].instance_id is defined
+
+  - name: Allocate the EIP to the new instance
+    ec2_eip:
+      instance_id: "{{ new_server.instances[0].instance_id }}"
+      ip: "{{ live_ip_address }}"
+      region: "{{ region }}"
+
+  - name: Terminate the existing Green Server.
+    ec2:
+      exact_count: 0
+      count_tag:
+        Deploy: Green
+        Name: Coap_Server
+      region: "{{ region }}"
+      image: notneeded
+
+  - name: All done, set new server to Green status
+    ec2_tag:
+       region: "{{ region }}"
+       resource: "{{ new_server.instances[0].instance_id}}"
+       tags:
+          Deploy: Green
+       state: present
+
+  - name: Remove Blue Tag
+    ec2_tag:
+       region: "{{ region }}"
+       resource: "{{ new_server.instances[0].instance_id }}"
+       tags:
+          Deploy: Blue
+       state: absent
