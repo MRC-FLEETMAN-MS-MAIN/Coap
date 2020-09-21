@@ -59,8 +59,6 @@
 
     - name: Allocating elastic IP to instance
       ec2_eip:
-         aws_access_key: AKIASZM335QBSRJFVV6N
-         aws_secret_key: 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
          in_vpc: yes
          ip: "{{ elastic_ip }}"
          state: present
